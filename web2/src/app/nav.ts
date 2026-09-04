@@ -1,13 +1,32 @@
-export type NavItem = { label: string; to: string; section: string };
+import type { LucideIcon } from "lucide-react";
+import { FileText } from "lucide-react";
+import { RESOURCES } from "@/features/catalog/registry";
 
-export const NAV: NavItem[] = [
-  { section: "Command", label: "Operations board", to: "/dashboard" },
-  { section: "Stock", label: "Tank farm", to: "/stock/tanks" },
-  { section: "Stock", label: "Receipts", to: "/stock/receipts" },
-  { section: "Gantry", label: "Loadings", to: "/gantry/loadings" },
-  { section: "Terminal", label: "Pump-over", to: "/terminal/pumpover" },
-  { section: "Commercial", label: "Billing", to: "/billing" },
-  { section: "Compliance", label: "EWURA", to: "/ewura" },
-  { section: "Control", label: "Users", to: "/access/users" },
-  { section: "Control", label: "Roles", to: "/access/roles" },
-];
+export type NavLeaf = {
+  kind: "link";
+  to: string;
+  label: string;
+  icon: LucideIcon;
+  section: string;
+  perms: string[];
+};
+
+export const NAV: NavLeaf[] = RESOURCES.map((r) => ({
+  kind: "link" as const,
+  to: r.path,
+  label: r.title,
+  icon: FileText,
+  section: r.section,
+  perms: r.perms,
+}));
+
+export const NAV_SECTIONS = [
+  "Command",
+  "Operations",
+  "Reports",
+  "Setups",
+  "Compliance",
+  "Commercial",
+  "Access",
+  "System",
+] as const;
