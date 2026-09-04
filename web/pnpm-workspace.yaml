@@ -1,0 +1,5 @@
+# pnpm 10+ skips dependency install scripts unless listed here.
+# unrs-resolver (eslint-import-resolver-typescript / Next 16) unpacks its
+# platform native binary in postinstall.
+allowBuilds:
+  unrs-resolver: true

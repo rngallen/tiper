@@ -1,0 +1,1749 @@
+openapi: 3.0.3
+info:
+  title: TIPER Depot Fuel Management System API
+  version: 1.0.0
+  description: |
+    Enterprise depot fuel management for **TIPER** (Tanzania International
+    Petroleum Reserves Limited) at Kigamboni — stock ledger, vessel receipts
+    via **SBM** (Single Buoy Mooring) and **KOJ** (Kurasini Oil Jetty), ITT,
+    zerolisation, gantry loading, pump-over, FSF/VSF/TBS/KOJ billing, EWURA
+    licenses, Sage AR posting, and approvals.
+
+    **Company**
+    Tanzania International Petroleum Reserves Limited · Dar es Salaam, Tanzania
+    Website: https://tiper.co.tz
+
+    **Authentication (PASETO, OTP-mandatory)**
+    1. `POST /auth/login` with email and password — returns a short-lived
+       **OTP token** and sends a verification code (email, plus SMS when the
+       user has a phone number).
+    2. `POST /auth/mfa/verify` with the code, sending the OTP token as the
+       Bearer token — returns the access + refresh token pair.
+    3. Send the access token on every request: `Authorization: Bearer <token>`.
+    4. Refresh before expiry with `POST /auth/refresh` (send the **refresh**
+       token as the Bearer token). Both tokens are rotated.
+
+    **Response envelope** — every endpoint returns
+    `{ "message": string?, "details": object|array? }`.
+
+    **Permissions** follow `{module}.{action}` (e.g. `inventory.read`,
+    `billing.run`, `reports.read`). A `{module}.manage` code grants full access
+    to that module. Super-users bypass all checks.
+
+    **Reports** — `GET /reports/{code}` returns JSON. Append `.pdf` or pass
+    `export=true` / `format=xlsx` for a printable PDF or Excel workbook.
+  contact:
+    name: Tanzania International Petroleum Reserves Limited
+    url: https://tiper.co.tz
+    email: info@tiper.co.tz
+  license:
+    name: Proprietary
+    url: https://tiper.co.tz
+
+servers:
+  - url: /api/v1
+    description: Versioned REST API
+  - url: /
+    description: Root (health probes, raw spec)
+
+tags:
+  - name: System
+    description: Health and readiness probes
+  - name: Auth
+    description: Login, OTP, tokens, profile and password
+  - name: Users
+    description: User administration (`users.read` / `users.manage`)
+  - name: Roles & Permissions
+    description: RBAC (`roles.read` / `roles.manage`)
+  - name: Titles
+    description: Job-title catalogue
+  - name: Master data
+    description: Products, tanks, vessels, customers, depots (`masterdata.*`)
+  - name: Inventory
+    description: Receipts, ITT, zerolisation, dips, book ledger (`inventory.*`)
+  - name: Orders
+    description: GLR, pump-over, trucks, compartmentalization (`orders.*`)
+  - name: Billing
+    description: Profiles, runs, variable/KOJ/TBS/MI-loss batches (`billing.*`)
+  - name: EWURA
+    description: Petroleum licenses synced from the regulator (`ewura.*`)
+  - name: Workflow
+    description: Approval processes, inbox and decisions
+  - name: Sage
+    description: Sage 200 connection status (posting lives in the billing engine)
+  - name: Audit
+    description: Append-only audit trail with field-level diffs
+  - name: Reports
+    description: Stock, reception, gantry, finance and access reports (JSON / Excel / PDF)
+  - name: Settings
+    description: Company profile, currencies, mail, SMS, Sage, session and schedules
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      security: []
+      servers: [{ url: / }]
+      summary: Liveness probe
+      description: Process is up. Does not check databases.
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            application/json:
+              example: { status: OK }
+  /readyz:
+    get:
+      tags: [System]
+      security: []
+      servers: [{ url: / }]
+      summary: Readiness probe (pings application and Sage databases)
+      responses:
+        "200":
+          description: Service is ready
+          content:
+            application/json:
+              example: { status: OK }
+        "503":
+          description: A dependency is unavailable
+
+  /auth/csrf:
+    get:
+      tags: [Auth]
+      security: []
+      summary: Fetch CSRF token for cookie-based SPA calls
+      responses:
+        "200":
+          description: CSRF token
+          content:
+            application/json:
+              example: { details: { csrfToken: "…" } }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Authenticate with email + password (always issues an OTP)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+            example: { email: ngallen4@gmail.com, password: "Admin@2026" }
+      responses:
+        "200":
+          description: OTP challenge
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      details: { $ref: "#/components/schemas/LoginPending" }
+
+  /auth/mfa/verify:
+    post:
+      tags: [Auth]
+      summary: Verify the one-time code (send OTP token as Bearer)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, example: "123456" }
+      responses:
+        "200":
+          description: Session tokens
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      details: { $ref: "#/components/schemas/TokenResponse" }
+
+  /auth/mfa/resend:
+    post:
+      tags: [Auth]
+      summary: Resend OTP (OTP Bearer required)
+      responses:
+        "200": { description: New challenge issued }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate access + refresh tokens (refresh token as Bearer)
+      responses:
+        "200":
+          description: New token pair
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      details: { $ref: "#/components/schemas/TokenResponse" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: End the current session
+      responses:
+        "200": { description: Signed out }
+
+  /auth/profile:
+    get:
+      tags: [Auth]
+      summary: Current user, permissions and idle policy
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      details: { $ref: "#/components/schemas/MeResponse" }
+    patch:
+      tags: [Auth]
+      summary: Update own name and profile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                firstName: { type: string }
+                lastName: { type: string }
+                profile: { $ref: "#/components/schemas/ProfileInput" }
+      responses:
+        "200": { description: Updated }
+
+  /auth/profile/apperance-settings:
+    patch:
+      tags: [Auth]
+      summary: Update UI appearance (theme, compact, sidebar)
+      responses:
+        "200": { description: Updated }
+
+  /auth/profile/table-prefs:
+    put:
+      tags: [Auth]
+      summary: Save per-table column order / visibility
+      responses:
+        "200": { description: Saved }
+
+  /auth/profile/dashboard:
+    put:
+      tags: [Auth]
+      summary: Save the signed-in user's chart dashboard (max 16 widgets)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DashboardPayload" }
+      responses:
+        "200": { description: Saved }
+
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change own password (invalidates other sessions)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [oldPassword, newPassword, confirmPassword]
+              properties:
+                oldPassword: { type: string, format: password }
+                newPassword: { type: string, format: password }
+                confirmPassword: { type: string, format: password }
+      responses:
+        "200": { description: Password changed }
+
+  /auth/users:
+    get:
+      tags: [Users]
+      summary: List users
+      parameters: [{ $ref: "#/components/parameters/Page" }, { $ref: "#/components/parameters/PageSize" }, { $ref: "#/components/parameters/Search" }]
+      responses:
+        "200": { description: Paginated users }
+    post:
+      tags: [Users]
+      summary: Create a user (temporary password emailed / SMS)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserCreateRequest" }
+      responses:
+        "200": { description: Created }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/users/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    patch:
+      tags: [Users]
+      summary: Update a user
+      responses:
+        "200": { description: Updated }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Users]
+      summary: Delete a user who has never signed in
+      responses:
+        "200": { description: Deleted }
+
+  /auth/users/{uid}/unlock:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Users]
+      summary: Unlock a locked account
+      responses:
+        "200": { description: Unlocked }
+
+  /auth/users/{uid}/reset-password:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Users]
+      summary: Reset password and email a temporary one
+      responses:
+        "200": { description: Reset }
+
+  /auth/users/{uid}/roles:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    put:
+      tags: [Users]
+      summary: Replace assigned roles
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                roleIds: { type: array, items: { type: integer } }
+      responses:
+        "200": { description: Updated }
+
+  /auth/users/search:
+    get:
+      tags: [Users]
+      summary: Typeahead user search
+      parameters: [{ $ref: "#/components/parameters/Search" }]
+      responses:
+        "200": { description: Matching users }
+
+  /auth/roles:
+    get:
+      tags: [Roles & Permissions]
+      summary: List roles
+      responses:
+        "200": { description: Roles }
+    post:
+      tags: [Roles & Permissions]
+      summary: Create a role
+      responses:
+        "200": { description: Created }
+
+  /auth/roles/options:
+    get:
+      tags: [Roles & Permissions]
+      summary: Compact role list for pickers
+      responses:
+        "200": { description: Options }
+
+  /auth/roles/{id}:
+    parameters: [{ $ref: "#/components/parameters/IntId" }]
+    get:
+      tags: [Roles & Permissions]
+      summary: Get a role
+      responses:
+        "200": { description: Role }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Roles & Permissions]
+      summary: Update a role
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [Roles & Permissions]
+      summary: Delete an unused role
+      responses:
+        "200": { description: Deleted }
+
+  /auth/roles/{id}/permissions:
+    parameters: [{ $ref: "#/components/parameters/IntId" }]
+    put:
+      tags: [Roles & Permissions]
+      summary: Replace role permissions
+      responses:
+        "200": { description: Updated }
+
+  /auth/permissions:
+    get:
+      tags: [Roles & Permissions]
+      summary: List permission catalogue
+      responses:
+        "200": { description: Permissions }
+
+  /auth/titles:
+    get:
+      tags: [Titles]
+      summary: List job titles
+      responses:
+        "200": { description: Titles }
+    post:
+      tags: [Titles]
+      summary: Create a job title
+      responses:
+        "200": { description: Created }
+
+  /auth/titles/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    patch:
+      tags: [Titles]
+      summary: Update a job title
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [Titles]
+      summary: Delete a job title
+      responses:
+        "200": { description: Deleted }
+
+  /master/lookups:
+    get:
+      tags: [Master data]
+      summary: Combined catalogues for forms (products, statuses, routes, tenders)
+      responses:
+        "200": { description: Lookups }
+
+  /master/categories:
+    get:
+      tags: [Master data]
+      summary: List stock categories
+      responses:
+        "200": { description: Categories }
+    post:
+      tags: [Master data]
+      summary: Create a stock category
+      responses:
+        "200": { description: Created }
+
+  /master/products:
+    get:
+      tags: [Master data]
+      summary: List products (AGO, PMS, HFO, DPK, …)
+      responses:
+        "200": { description: Products }
+    post:
+      tags: [Master data]
+      summary: Create a product
+      responses:
+        "200": { description: Created }
+
+  /master/statuses:
+    get:
+      tags: [Master data]
+      summary: List stock statuses (Local, Transit, Mines, Proration)
+      responses:
+        "200": { description: Statuses }
+    post:
+      tags: [Master data]
+      summary: Create a stock status
+      responses:
+        "200": { description: Created }
+
+  /master/uoms:
+    get:
+      tags: [Master data]
+      summary: List units of measure
+      responses:
+        "200": { description: UOMs }
+
+  /master/tanks:
+    get:
+      tags: [Master data]
+      summary: List shore tanks
+      responses:
+        "200": { description: Tanks }
+    post:
+      tags: [Master data]
+      summary: Create a tank
+      responses:
+        "200": { description: Created }
+
+  /master/vessels:
+    get:
+      tags: [Master data]
+      summary: List vessels
+      responses:
+        "200": { description: Vessels }
+    post:
+      tags: [Master data]
+      summary: Create a vessel
+      responses:
+        "200": { description: Created }
+
+  /master/depots:
+    get:
+      tags: [Master data]
+      summary: List TIPER and pump-over destination depots
+      responses:
+        "200": { description: Depots }
+    post:
+      tags: [Master data]
+      summary: Create a depot
+      responses:
+        "200": { description: Created }
+
+  /master/customers:
+    get:
+      tags: [Master data]
+      summary: List OMC customers
+      responses:
+        "200": { description: Customers }
+    post:
+      tags: [Master data]
+      summary: Create a customer
+      responses:
+        "200": { description: Created }
+
+  /master/customers/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Master data]
+      summary: Get a customer
+      responses:
+        "200": { description: Customer }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /master/customers/{uid}/billing-accounts:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Master data]
+      summary: List Sage AR accounts mapped to this customer per fee and currency
+      responses:
+        "200": { description: Billing accounts }
+    post:
+      tags: [Master data]
+      summary: Map a Sage Client account to a fee (currency comes from Sage iCurrencyID)
+      responses:
+        "201": { description: Created }
+        "409": { description: Sage account already owned by another party }
+
+  /master/customers/{uid}/attachments:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Master data]
+      summary: List registration documents on this customer
+      responses:
+        "200": { description: Attachments }
+    post:
+      tags: [Master data]
+      summary: Upload customer documents copied onto new ILR, pump-over, and ITT
+      responses:
+        "201": { description: Created }
+
+  /master/suppliers:
+    get:
+      tags: [Master data]
+      summary: List suppliers
+      responses:
+        "200": { description: Suppliers }
+    post:
+      tags: [Master data]
+      summary: Create a supplier
+      responses:
+        "200": { description: Created }
+
+  /master/suppliers/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Master data]
+      summary: Get a supplier including billing accounts
+      responses:
+        "200": { description: Supplier }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /master/suppliers/{uid}/billing-accounts:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Master data]
+      summary: List Sage AR accounts mapped to this supplier per fee and currency
+      responses:
+        "200": { description: Billing accounts }
+    post:
+      tags: [Master data]
+      summary: Map a Sage Client account to a fee (currency comes from Sage iCurrencyID)
+      responses:
+        "201": { description: Created }
+        "409": { description: Sage account already owned by another party }
+
+  /master/suppliers/{uid}/attachments:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Master data]
+      summary: List registration documents on this supplier
+      responses:
+        "200": { description: Attachments }
+    post:
+      tags: [Master data]
+      summary: Upload supplier documents (TIN certificate, contract, registration)
+      responses:
+        "201": { description: Created }
+
+  /ic/balances:
+    get:
+      tags: [Inventory]
+      summary: Book stock balances (customer × product × vessel × status)
+      responses:
+        "200": { description: Balances }
+
+  /ic/reservations:
+    get:
+      tags: [Inventory]
+      summary: List stock reservations
+      responses:
+        "200": { description: Reservations }
+    post:
+      tags: [Inventory]
+      summary: Reserve stock for an order
+      responses:
+        "200": { description: Reserved }
+
+  /ic/reservations/{order}/release:
+    parameters:
+      - name: order
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Inventory]
+      summary: Release a reservation
+      responses:
+        "200": { description: Released }
+
+  /ic/receipts:
+    get:
+      tags: [Inventory]
+      summary: List vessel receipts (SBM / KOJ)
+      parameters: [{ $ref: "#/components/parameters/From" }, { $ref: "#/components/parameters/To" }]
+      responses:
+        "200": { description: Receipts }
+    post:
+      tags: [Inventory]
+      summary: Create a vessel receipt
+      responses:
+        "200": { description: Created }
+
+  /ic/receipts/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Inventory]
+      summary: Get a receipt with parcels
+      responses:
+        "200": { description: Receipt }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /ic/receipts/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Inventory]
+      summary: Submit a receipt into workflow
+      responses:
+        "200": { description: Submitted }
+
+  /ic/receipts/{uid}/convert-to-final:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Inventory]
+      summary: Convert a provision receipt to final quantities
+      responses:
+        "200": { description: Converted }
+
+  /ic/itt:
+    get:
+      tags: [Inventory]
+      summary: List in-tank transfers
+      responses:
+        "200": { description: Transfers }
+    post:
+      tags: [Inventory]
+      summary: Create an ITT
+      responses:
+        "200": { description: Created }
+
+  /ic/itt/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Inventory]
+      summary: Submit an ITT into workflow
+      responses:
+        "200": { description: Submitted }
+
+  /ic/zerolization:
+    get:
+      tags: [Inventory]
+      summary: List zerolisation transfers
+      responses:
+        "200": { description: Transfers }
+    post:
+      tags: [Inventory]
+      summary: Create a zerolisation
+      responses:
+        "200": { description: Created }
+
+  /ic/zerolization/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Inventory]
+      summary: Submit a zerolisation into workflow
+      responses:
+        "200": { description: Submitted }
+
+  /ic/dips:
+    get:
+      tags: [Inventory]
+      summary: List physical tank dips
+      responses:
+        "200": { description: Dips }
+    post:
+      tags: [Inventory]
+      summary: Record a physical dip
+      responses:
+        "200": { description: Created }
+
+  /ic/line-content:
+    post:
+      tags: [Inventory]
+      summary: Record daily pipeline line content
+      responses:
+        "200": { description: Created }
+
+  /ic/events:
+    get:
+      tags: [Inventory]
+      summary: List inbound gantry / pump-over events
+      responses:
+        "200": { description: Events }
+    post:
+      tags: [Inventory]
+      summary: Ingest an inventory event
+      responses:
+        "200": { description: Created }
+
+  /ic/movements:
+    get:
+      tags: [Inventory]
+      summary: List book ledger movements
+      parameters: [{ $ref: "#/components/parameters/From" }, { $ref: "#/components/parameters/To" }]
+      responses:
+        "200": { description: Movements }
+
+  /orders/loading:
+    get:
+      tags: [Orders]
+      summary: List gantry loading requests
+      responses:
+        "200": { description: GLRs }
+    post:
+      tags: [Orders]
+      summary: Create a GLR
+      responses:
+        "200": { description: Created }
+
+  /orders/loading/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Orders]
+      summary: Get a GLR
+      responses:
+        "200": { description: GLR }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /orders/loading/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Orders]
+      summary: Submit a GLR into workflow
+      responses:
+        "200": { description: Submitted }
+
+  /orders/loading-lines:
+    get:
+      tags: [Orders]
+      summary: List gantry loading lines (trucks)
+      responses:
+        "200": { description: Lines }
+
+  /orders/loading-lines/{uid}/complete:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Orders]
+      summary: Mark a loading line complete
+      responses:
+        "200": { description: Completed }
+
+  /orders/pump-over:
+    get:
+      tags: [Orders]
+      summary: List pump-over requests (pipeline delivery orders)
+      responses:
+        "200": { description: Requests }
+    post:
+      tags: [Orders]
+      summary: Create a pump-over request
+      responses:
+        "200": { description: Created }
+
+  /orders/pump-over/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Orders]
+      summary: Get a pump-over request
+      responses:
+        "200": { description: Request }
+
+  /orders/pump-over/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Orders]
+      summary: Submit a pump-over request
+      responses:
+        "200": { description: Submitted }
+
+  /orders/pump-over-reports:
+    get:
+      tags: [Orders]
+      summary: List executed pump-over reports
+      responses:
+        "200": { description: Reports }
+    post:
+      tags: [Orders]
+      summary: Create a pump-over report
+      responses:
+        "200": { description: Created }
+
+  /orders/pump-over-reports/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Orders]
+      summary: Submit a pump-over report
+      responses:
+        "200": { description: Submitted }
+
+  /orders/compartmentalizations:
+    get:
+      tags: [Orders]
+      summary: List compartmentalizations (ALMA SAP3C)
+      responses:
+        "200": { description: Records }
+    post:
+      tags: [Orders]
+      summary: Create a compartmentalization from an open ILO
+      description: |
+        Builds tank cells from the truck calibration. Status is `running`.
+        Body: `{ iloId, badgeId?, confirmExpiry? }`.
+        409 with `details.code=nearExpiry` when the ILO expires within 3 days
+        (retry with confirmExpiry=true). 422 for expired ILO, expired driver
+        licence, or missing/expired calibration.
+      responses:
+        "201": { description: Created }
+        "409": { description: Near-expiry confirmation required }
+        "422": { description: Gate check failed }
+
+  /orders/compartmentalizations/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Orders]
+      summary: Get a compartmentalization
+      responses:
+        "200": { description: Record }
+
+  /orders/compartmentalizations/{uid}/lines:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Orders]
+      summary: Save compartment lines (product, litres, seals)
+      description: Seals are uppercased. Top/dip/bottom must differ and must not repeat elsewhere.
+      responses:
+        "200": { description: Saved }
+
+  /orders/compartmentalizations/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Orders]
+      summary: Submit a compartmentalization
+      responses:
+        "200": { description: Submitted }
+
+  /orders/amendments:
+    get:
+      tags: [Orders]
+      summary: List order amendments
+      responses:
+        "200": { description: Amendments }
+    post:
+      tags: [Orders]
+      summary: Create an amendment
+      responses:
+        "200": { description: Created }
+
+  /orders/badges:
+    get:
+      tags: [Orders]
+      summary: List gantry badges
+      responses:
+        "200": { description: Badges }
+    post:
+      tags: [Orders]
+      summary: Create a badge
+      responses:
+        "200": { description: Created }
+
+  /billing/profiles:
+    get:
+      tags: [Billing]
+      summary: List FCF billing profiles
+      responses:
+        "200": { description: Profiles }
+    post:
+      tags: [Billing]
+      summary: Create an FCF billing profile
+      responses:
+        "201": { description: Created }
+
+  /billing/profiles/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Billing]
+      summary: Get an FCF billing profile
+      responses:
+        "200": { description: Profile }
+    put:
+      tags: [Billing]
+      summary: Update an FCF billing profile
+      responses:
+        "200": { description: Updated }
+
+  /billing/runs:
+    get:
+      tags: [Billing]
+      summary: List billing runs
+      parameters: [{ $ref: "#/components/parameters/From" }, { $ref: "#/components/parameters/To" }]
+      responses:
+        "200": { description: Runs }
+
+  /billing/runs/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Billing]
+      summary: Get a billing run
+      responses:
+        "200": { description: Run }
+
+  /billing/runs/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Billing]
+      summary: Submit a billing run into workflow
+      responses:
+        "200": { description: Submitted }
+
+  /billing/engine/simulate:
+    post:
+      tags: [Billing]
+      summary: Simulate a billing run without posting
+      responses:
+        "200": { description: Simulation }
+
+  /billing/engine/nth:
+    post:
+      tags: [Billing]
+      summary: Run nth-cycle FSF billing
+      responses:
+        "200": { description: Started }
+
+  /billing/engine/tbs:
+    post:
+      tags: [Billing]
+      summary: Run TBS truck-loading billing
+      responses:
+        "200": { description: Started }
+
+  /billing/engine/vsf:
+    post:
+      tags: [Billing]
+      summary: Run variable storage fee billing
+      responses:
+        "200": { description: Started }
+
+  /billing/vsf/batches:
+    get:
+      tags: [Billing]
+      summary: List variable storage fee batches
+      responses:
+        "200": { description: Batches }
+    post:
+      tags: [Billing]
+      summary: Create a variable storage fee batch
+      responses:
+        "201": { description: Created }
+
+  /billing/vsf/batches/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Billing]
+      summary: Get a variable storage fee batch
+      responses:
+        "200": { description: Batch }
+    put:
+      tags: [Billing]
+      summary: Update a draft or returned variable storage fee batch
+      responses:
+        "200": { description: Updated }
+
+  /billing/vsf/batches/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Billing]
+      summary: Submit a variable storage fee batch
+      responses:
+        "200": { description: Submitted }
+
+  /billing/koj/batches:
+    get:
+      tags: [Billing]
+      summary: List KOJ facility-fee batches
+      responses:
+        "200": { description: Batches }
+    post:
+      tags: [Billing]
+      summary: Create a KOJ fee batch
+      responses:
+        "201": { description: Created }
+
+  /billing/koj/batches/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Billing]
+      summary: Get a KOJ fee batch
+      responses:
+        "200": { description: Batch }
+    put:
+      tags: [Billing]
+      summary: Update a draft or returned KOJ fee batch
+      responses:
+        "200": { description: Updated }
+
+  /billing/koj/batches/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Billing]
+      summary: Submit a KOJ fee batch
+      responses:
+        "200": { description: Submitted }
+
+  /billing/tbs/batches:
+    get:
+      tags: [Billing]
+      summary: List TBS fee batches
+      responses:
+        "200": { description: Batches }
+    post:
+      tags: [Billing]
+      summary: Create a TBS fee batch
+      responses:
+        "201": { description: Created }
+
+  /billing/tbs/batches/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Billing]
+      summary: Get a TBS fee batch
+      responses:
+        "200": { description: Batch }
+    put:
+      tags: [Billing]
+      summary: Update a draft or returned TBS fee batch
+      responses:
+        "200": { description: Updated }
+
+  /billing/tbs/batches/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Billing]
+      summary: Submit a TBS fee batch
+      responses:
+        "200": { description: Submitted }
+
+  /billing/miloss/batches:
+    get:
+      tags: [Billing]
+      summary: List marine insurance / loss batches
+      responses:
+        "200": { description: Batches }
+    post:
+      tags: [Billing]
+      summary: Create an MI-loss batch
+      responses:
+        "200": { description: Created }
+
+  /billing/miloss/batches/{uid}/submit:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Billing]
+      summary: Submit an MI-loss batch
+      responses:
+        "200": { description: Submitted }
+
+  /billing/fx:
+    get:
+      tags: [Billing]
+      summary: List exchange rates
+      responses:
+        "200": { description: Rates }
+    post:
+      tags: [Billing]
+      summary: Record an exchange rate
+      responses:
+        "201": { description: Created }
+
+  /billing/fx/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Billing]
+      summary: Get an exchange rate
+      responses:
+        "200": { description: Rate }
+    put:
+      tags: [Billing]
+      summary: Update an exchange rate
+      responses:
+        "200": { description: Updated }
+
+  /ewura/licenses:
+    get:
+      tags: [EWURA]
+      summary: List petroleum licenses
+      parameters: [{ $ref: "#/components/parameters/Search" }]
+      responses:
+        "200": { description: Licenses }
+
+  /ewura/classes:
+    get:
+      tags: [EWURA]
+      summary: Distinct license classes
+      responses:
+        "200": { description: Classes }
+
+  /ewura/licenses/sync:
+    post:
+      tags: [EWURA]
+      summary: Pull licenses from the EWURA portal
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string }
+      responses:
+        "200": { description: Synced }
+
+  /workflow/processes:
+    get:
+      tags: [Workflow]
+      summary: List approval process definitions
+      responses:
+        "200": { description: Processes }
+
+  /workflow/processes/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Workflow]
+      summary: Get a process (steps + initiator pool)
+      responses:
+        "200": { description: Process }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /workflow/processes/{uid}/amendment-mode:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    patch:
+      tags: [Workflow]
+      summary: Set soft-reject amendment mode (creator vs pool)
+      responses:
+        "200": { description: Updated }
+
+  /workflow/processes/{uid}/initiator-pool:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    put:
+      tags: [Workflow]
+      summary: Replace initiator pool members
+      responses:
+        "200": { description: Updated }
+
+  /workflow/processes/{uid}/notifications:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    put:
+      tags: [Workflow]
+      summary: Set FYI watchers
+      responses:
+        "200": { description: Updated }
+
+  /workflow/processes/{uid}/steps:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    put:
+      tags: [Workflow]
+      summary: Replace ordered approval steps
+      responses:
+        "200": { description: Updated }
+
+  /workflow/tasks/mine:
+    get:
+      tags: [Workflow]
+      summary: My pending approval tasks
+      responses:
+        "200": { description: Tasks }
+
+  /workflow/tasks/inbox:
+    get:
+      tags: [Workflow]
+      summary: Combined inbox (own + substitute coverage)
+      responses:
+        "200": { description: Inbox }
+
+  /workflow/decisions/mine:
+    get:
+      tags: [Workflow]
+      summary: Decisions I have already taken
+      responses:
+        "200": { description: Decisions }
+
+  /workflow/substitute/me:
+    get:
+      tags: [Workflow]
+      summary: My current substitute
+      responses:
+        "200": { description: Substitute }
+    put:
+      tags: [Workflow]
+      summary: Set a substitute
+      responses:
+        "200": { description: Saved }
+
+  /workflow/substitute/me/{uid}:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    delete:
+      tags: [Workflow]
+      summary: Clear a substitute
+      responses:
+        "200": { description: Cleared }
+
+  /workflow/act/bulk:
+    post:
+      tags: [Workflow]
+      summary: Approve or reject many tasks
+      responses:
+        "200": { description: Applied }
+
+  /workflow/instances/{uid}/act:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    post:
+      tags: [Workflow]
+      summary: Approve, reject or comment on one instance
+      responses:
+        "200": { description: Applied }
+
+  /workflow/instances/{uid}/history:
+    parameters: [{ $ref: "#/components/parameters/Uid" }]
+    get:
+      tags: [Workflow]
+      summary: Approval history for an instance
+      responses:
+        "200": { description: History }
+
+  /sage/status:
+    get:
+      tags: [Sage]
+      summary: Whether the Sage 200 connection is up
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              example: { details: { connected: true } }
+
+  /sage/clients:
+    get:
+      tags: [Sage]
+      summary: Search Sage Client accounts that are not on hold
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/Search" }
+        - { name: ownerType, in: query, schema: { type: string, enum: [customer, supplier] } }
+        - { name: ownerId, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Paginated Sage AR accounts (active only)
+        "503":
+          description: Sage 200 is not connected
+
+  /audit:
+    get:
+      tags: [Audit]
+      summary: List audit entries
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PageSize" }
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+        - { $ref: "#/components/parameters/Search" }
+      responses:
+        "200": { description: Audit page }
+
+  /reports/registry:
+    get:
+      tags: [Reports]
+      summary: Catalogue of report codes, groups, filters and descriptions
+      responses:
+        "200":
+          description: Registry
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      details:
+                        type: array
+                        items: { $ref: "#/components/schemas/ReportMeta" }
+
+  /reports/charts/catalog:
+    get:
+      tags: [Reports]
+      summary: Chart sources a user can add to their dashboard
+      responses:
+        "200": { description: Chart catalogue }
+
+  /reports/charts/{source}:
+    parameters:
+      - name: source
+        in: path
+        required: true
+        schema: { type: string, example: stock-by-product }
+    get:
+      tags: [Reports]
+      summary: Series for one dashboard chart
+      responses:
+        "200": { description: Points }
+
+  /reports/{code}:
+    parameters: [{ $ref: "#/components/parameters/ReportCode" }]
+    get:
+      tags: [Reports]
+      summary: Run a report (JSON, or Excel with export=true)
+      parameters:
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+        - name: year
+          in: query
+          schema: { type: integer, example: 2026 }
+        - name: month
+          in: query
+          schema: { type: integer, example: 8 }
+        - name: date
+          in: query
+          schema: { type: string, example: "2026-08-22" }
+        - name: route
+          in: query
+          schema: { type: string, enum: [SBM, KOJ] }
+          description: Discharge route — SBM (Single Buoy Mooring) or KOJ (Kurasini Oil Jetty)
+        - name: customer
+          in: query
+          schema: { type: string }
+          description: Customer code or UID (individual customer stock)
+        - name: export
+          in: query
+          schema: { type: boolean }
+          description: When true, return an Excel workbook
+      responses:
+        "200": { description: Rows or workbook }
+
+  /reports/{code}.pdf:
+    parameters: [{ $ref: "#/components/parameters/ReportCode" }]
+    get:
+      tags: [Reports]
+      summary: Printable PDF of the same report
+      parameters:
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+      responses:
+        "200":
+          description: PDF
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+
+  /settings/company:
+    get:
+      tags: [Settings]
+      summary: Company letterhead (singleton)
+      responses:
+        "200": { description: Company }
+    put:
+      tags: [Settings]
+      summary: Update company letterhead and public site URL
+      responses:
+        "200": { description: Updated }
+
+  /settings/currencies:
+    get:
+      tags: [Settings]
+      summary: ISO currency catalogue
+      responses:
+        "200": { description: Currencies }
+    post:
+      tags: [Settings]
+      summary: Register a currency
+      responses:
+        "200": { description: Created }
+
+  /settings/countries:
+    get:
+      tags: [Settings]
+      summary: ISO 3166-1 countries
+      responses:
+        "200": { description: Countries }
+
+  /settings/integrations/mail:
+    get:
+      tags: [Settings]
+      summary: SMTP settings (password write-only)
+      responses:
+        "200": { description: Mail }
+    put:
+      tags: [Settings]
+      summary: Update SMTP settings
+      responses:
+        "200": { description: Updated }
+
+  /settings/integrations/mail/test:
+    post:
+      tags: [Settings]
+      summary: Send a test email
+      responses:
+        "200": { description: Sent }
+
+  /settings/integrations/sms:
+    get:
+      tags: [Settings]
+      summary: SMS gateway settings
+      responses:
+        "200": { description: SMS }
+    put:
+      tags: [Settings]
+      summary: Update SMS settings
+      responses:
+        "200": { description: Updated }
+
+  /settings/integrations/sms/test:
+    post:
+      tags: [Settings]
+      summary: Send a test SMS
+      responses:
+        "200": { description: Sent }
+
+  /settings/integrations/sage:
+    get:
+      tags: [Settings]
+      summary: Sage 200 connection settings
+      responses:
+        "200": { description: Sage }
+    put:
+      tags: [Settings]
+      summary: Update Sage connection
+      responses:
+        "200": { description: Updated }
+
+  /settings/integrations/sage/test:
+    post:
+      tags: [Settings]
+      summary: Ping Sage
+      responses:
+        "200": { description: Result }
+
+  /settings/integrations/uploads:
+    get:
+      tags: [Settings]
+      summary: Attachment storage directory and size limits
+      responses:
+        "200": { description: Uploads }
+    put:
+      tags: [Settings]
+      summary: Update attachment directory and upload limits
+      responses:
+        "200": { description: Updated }
+
+  /settings/integrations/session:
+    get:
+      tags: [Settings]
+      summary: Idle timeout and session policy
+      responses:
+        "200": { description: Session }
+    put:
+      tags: [Settings]
+      summary: Update session policy
+      responses:
+        "200": { description: Updated }
+
+  /settings/schedules:
+    get:
+      tags: [Settings]
+      summary: Cron expressions (log rotation, EWURA, billing, NPGIS)
+      responses:
+        "200": { description: Schedules }
+    put:
+      tags: [Settings]
+      summary: Update schedules
+      responses:
+        "200": { description: Updated }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: PASETO
+      description: >
+        PASETO v2.local token. Use the access token for normal calls, the OTP
+        token for `/auth/mfa/verify`, and the refresh token for `/auth/refresh`.
+
+  parameters:
+    Uid:
+      name: uid
+      in: path
+      required: true
+      schema: { type: string, example: 01J0ABCDXYZ0000000000000 }
+      description: Public ULID
+    IntId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, example: 2 }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, default: 1, minimum: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, default: 10, maximum: 100 }
+    Search:
+      name: search
+      in: query
+      schema: { type: string }
+    From:
+      name: from
+      in: query
+      schema: { type: string, example: "2026-08-01" }
+      description: Inclusive start (YYYY-MM-DD)
+    To:
+      name: to
+      in: query
+      schema: { type: string, example: "2026-08-31" }
+      description: Inclusive end (YYYY-MM-DD)
+    ReportCode:
+      name: code
+      in: path
+      required: true
+      schema:
+        type: string
+        example: periodic-stock-status
+      description: >
+        Report code from GET /reports/registry. Stock and reception include
+        periodic-stock-status, gain-loss, ewura-weekly, pbpa-weekly,
+        customer-stock, daily-mass-balance, monthly-confirmation, itt-summary,
+        srt-vessels, sbm-receipts, koj-receipts, pump-over-status. Finance
+        includes billing-list, billing-by-trade, billing-by-product.
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Envelope" }
+          example: { message: resource not found }
+    ValidationError:
+      description: Validation failed (422)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Envelope" }
+          example:
+            message: Invalid input
+            details:
+              - { field: email, error: Must be a valid email address }
+
+  schemas:
+    Envelope:
+      type: object
+      description: Standard response wrapper used by every endpoint.
+      properties:
+        message: { type: string, example: Updated successfully }
+        details:
+          description: Payload — object, array or omitted
+          nullable: true
+
+    Pagination:
+      type: object
+      properties:
+        items: { type: array, items: {} }
+        page: { type: integer, example: 1 }
+        pageSize: { type: integer, example: 20 }
+        totalPages: { type: integer, example: 5 }
+        itemsCount: { type: integer, format: int64, example: 96 }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, example: ngallen4@gmail.com }
+        password: { type: string, format: password }
+
+    LoginPending:
+      type: object
+      properties:
+        message: { type: string }
+        token: { type: string, description: OTP-scoped Bearer for /auth/mfa/verify }
+        issuedAt: { type: string, format: date-time }
+        expiredAt: { type: string, format: date-time }
+
+    TokenResponse:
+      type: object
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+        token: { type: string }
+        tokenExpiresAt: { type: string, format: date-time }
+        refreshToken: { type: string }
+        refreshTokenExpiresAt: { type: string, format: date-time }
+        mustChangePassword: { type: boolean }
+
+    ProfileInput:
+      type: object
+      properties:
+        phoneNumber: { type: string, example: "255711223344" }
+        title: { type: string, example: Stock Accountant }
+
+    Profile:
+      type: object
+      properties:
+        phoneNumber: { type: string }
+        title: { type: string }
+        appearanceSettings:
+          type: object
+          nullable: true
+
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+        isActive: { type: boolean }
+        isLocked: { type: boolean }
+        mustChangePassword: { type: boolean }
+        twoFactorEnabled: { type: boolean }
+        lastLogin: { type: string, format: date-time }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/Role" }
+        profile: { $ref: "#/components/schemas/Profile" }
+
+    UserCreateRequest:
+      type: object
+      required: [email, firstName, lastName]
+      properties:
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+        profile: { $ref: "#/components/schemas/ProfileInput" }
+
+    MeResponse:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        permissions:
+          type: array
+          items: { type: string }
+          example: [inventory.read, reports.read, workflow.tasks]
+        isSuperUser: { type: boolean }
+        sessionIdleMinutes: { type: integer, example: 10 }
+        sessionIdleWarnSeconds: { type: integer, example: 120 }
+
+    Role:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string, example: Stock Accountant }
+        description: { type: string }
+        permissionCount: { type: integer }
+        permissions:
+          type: array
+          items: { $ref: "#/components/schemas/Permission" }
+
+    Permission:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string, example: inventory.read }
+        description: { type: string }
+        module: { type: string, example: inventory }
+
+    DashboardPayload:
+      type: object
+      properties:
+        widgets:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            required: [id, type, title, source]
+            properties:
+              id: { type: string }
+              type: { type: string, enum: [kpi, bar, line, doughnut, table] }
+              title: { type: string }
+              source: { type: string, example: stock-by-product }
+              span: { type: integer, enum: [1, 2] }
+
+    ReportMeta:
+      type: object
+      properties:
+        code: { type: string, example: periodic-stock-status }
+        name: { type: string }
+        group: { type: string, example: Stock }
+        description: { type: string }
+        filters:
+          type: array
+          items: { type: string }
+
+    Country:
+      type: object
+      properties:
+        code: { type: string, example: TZ }
+        name: { type: string }
+        alpha3: { type: string, example: TZA }
+        numeric: { type: string, example: "834" }
+        isActive: { type: boolean }

@@ -1,0 +1,41 @@
+@import "@xyflow/react/dist/style.css";
+
+.wf-step .wf-handle {
+  width: 8px !important;
+  height: 8px !important;
+  border: 2px solid #94a3b8 !important;
+  background: #fff !important;
+  opacity: 0.35;
+}
+
+.wf-step:hover .wf-handle,
+.wf-step:focus-within .wf-handle {
+  opacity: 1;
+}
+
+.react-flow__node.selected .wf-step {
+  outline: 2px solid #033860;
+  outline-offset: 3px;
+}
+
+.react-flow__edge-path {
+  stroke-linecap: round;
+}
+
+html.dark .react-flow {
+  background-color: #121820;
+}
+
+html.dark .react-flow__controls {
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.12);
+}
+
+html.dark .react-flow__controls-button {
+  background: #1e2736 !important;
+  border-bottom-color: rgb(255 255 255 / 0.12) !important;
+  fill: #e2e8f0 !important;
+}
+
+html.dark .react-flow__node.selected .wf-step {
+  outline-color: #7eb0d0;
+}
